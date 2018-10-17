@@ -1,0 +1,29 @@
+{
+  "name": "relief",
+  "description": "generate @ngrx boilerplate and relief some typing pain",
+  "author": "Evgeniy Okhrimenko (https://github.com/netoctone)",
+  "license": "MIT",
+  "version": "0.0.1",
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/netoctone/relief.git"
+  },
+  "main": "relief.js",
+  "files": [
+    "relief.js"
+  ],
+  "engines": {
+    "node": "*"
+  },
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "glob": "^7.1.1",
+    "typescript": "2.7.2"
+  },
+  "devDependencies": {
+    "@types/node": "~6.0.60",
+    "@types/glob": "^7.1.1"
+  }
+}
