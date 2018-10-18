@@ -122,6 +122,24 @@ function transpileFile(file) {
             ast: [ts.SyntaxKind[node.kind], node.pos, node.end]
         };
     }
+    function getImportedNames(decl) {
+        if (decl.importClause && decl.importClause.name) {
+            return [getNodeText(decl.importClause.name)];
+        }
+        if (decl.importClause && decl.importClause.namedBindings) {
+            var node = decl.importClause.namedBindings;
+            switch (node.kind) {
+                case ts.SyntaxKind.NamespaceImport:
+                    return [getNodeText(node.name)];
+                case ts.SyntaxKind.NamedImports:
+                    return node.elements.map(function (el) { return getNodeText(el.name); });
+            }
+        }
+        return [];
+    }
+    function walkImport(decl) {
+        return __assign({ imports: [[getNodeText(decl), getImportedNames(decl)]] }, genAST(decl));
+    }
     function walkSyntaxListItem(node) {
         switch (node.kind) {
             case ts.SyntaxKind.ClassDeclaration:
@@ -133,7 +151,7 @@ function transpileFile(file) {
                     .map(function (member) { return walkReducerClassMember(context_1, member); })
                     .reduce(addChildWalkData, __assign({}, context_1, genAST(node)));
             case ts.SyntaxKind.ImportDeclaration:
-                return __assign({ imports: [getNodeText(node)] }, genAST(node));
+                return walkImport(node);
             default:
                 return __assign({ statements: [getNodeText(node)] }, genAST(node));
         }
@@ -158,25 +176,49 @@ function transpileFile(file) {
     }
     var _a = walk(sc), reducer = _a.reducer, actions = _a.actions, fields = _a.fields, imports = _a.imports, statements = _a.statements;
     var initialFields = fields.filter(function (field) { return field[2]; });
+    var actionImports = imports.filter(function (_a) {
+        var importStatement = _a[0], importNames = _a[1];
+        return importNames.some(function (name) {
+            return actions.some(function (_a) {
+                var actionName = _a[0], payloadType = _a[1];
+                return payloadType.startsWith(name);
+            });
+        });
+    });
     var stateClass = reducer + "State";
-    function printActionType(act) {
-        return act[3] + ": " + act[4];
+    function printActionType(_a) {
+        var actionName = _a[0], payloadType = _a[1], body = _a[2], actionType = _a[3], actionTypeText = _a[4];
+        return actionType + ": " + actionTypeText;
     }
-    function printAction(act) {
-        return "export class " + act[0] + "Action implements Action {\n  public type: string = " + reducer + "Types." + act[3] + ";\n  constructor(public payload" + (act[1] === 'any' ? '?' : '') + ": " + act[1] + ") {}\n}";
+    function printAction(_a) {
+        var actionName = _a[0], payloadType = _a[1], body = _a[2], actionType = _a[3];
+        return "export class " + actionName + "Action implements Action {\n  public type: string = " + reducer + "Types." + actionType + ";\n  constructor(public payload" + (payloadType === 'any' ? '?' : '') + ": " + payloadType + ") {}\n}";
     }
-    function printActionReducerCase(act) {
-        return "    case " + reducer + "Types." + act[3] + ":\n      " + act[2].split('\n').join('\n  ') + "\n";
+    function printActionReducerCase(_a) {
+        var actionName = _a[0], payloadType = _a[1], body = _a[2], actionType = _a[3];
+        return "    case " + reducer + "Types." + actionType + ":\n      " + body.split('\n').join('\n  ') + "\n";
     }
-    function printField(field) {
-        return "  " + field[0] + ": " + field[1] + ";";
+    function printField(_a) {
+        var name = _a[0], type = _a[1];
+        return "  " + name + ": " + type + ";";
     }
-    function printFieldInitial(field) {
-        return "  " + field[0] + ": " + field[2];
+    function printFieldInitial(_a) {
+        var name = _a[0], type = _a[1], initialValue = _a[2];
+        return "  " + name + ": " + initialValue;
     }
-    var actionsSource = "import { Action } from '@ngrx/store';\n\nexport const " + reducer + "Types = {\n  " + actions.map(printActionType).join(',\n  ') + "\n}\n\n" + actions.map(printAction).join('\n\n') + "\n\nexport type " + reducer + "Actions =\n  | " + actions.map(function (act) { return act[0] + 'Action'; }).join('\n  | ') + ";";
+    var actionImportStatements = ["import { Action } from '@ngrx/store';"].concat(actionImports.map(function (_a) {
+        var statement = _a[0];
+        return statement;
+    }));
+    var actionsSource = actionImportStatements.join('\n') + "\n\nexport const " + reducer + "Types = {\n  " + actions.map(printActionType).join(',\n  ') + "\n}\n\n" + actions.map(printAction).join('\n\n') + "\n\nexport type " + reducer + "Actions =\n  | " + actions.map(function (_a) {
+        var actionName = _a[0];
+        return actionName + 'Action';
+    }).join('\n  | ') + ";";
     // actionsSource
-    var reducerSource = imports.join('\n') + "\n\n" + statements.join('\n\n') + "\n\ninterface " + stateClass + " {\n" + fields.map(printField).join('\n') + "\n}\n\nexport const initialState: " + stateClass + " = {\n" + initialFields.map(printFieldInitial).join(',\n') + "\n};\n\nexport function " + pascalToCamel(reducer) + "(\n  state: " + stateClass + " = initialState,\n  action: " + reducer + "Actions\n): " + stateClass + " {\n  switch (action.type) {\n" + actions.map(printActionReducerCase).join('\n') + "\n    default:\n      return state;\n  }\n}";
+    var reducerSource = imports.map(function (_a) {
+        var statement = _a[0];
+        return statement;
+    }).join('\n') + "\n\n" + statements.join('\n\n') + "\n\ninterface " + stateClass + " {\n" + fields.map(printField).join('\n') + "\n}\n\nexport const initialState: " + stateClass + " = {\n" + initialFields.map(printFieldInitial).join(',\n') + "\n};\n\nexport function " + pascalToCamel(reducer) + "(\n  state: " + stateClass + " = initialState,\n  action: " + reducer + "Actions\n): " + stateClass + " {\n  switch (action.type) {\n" + actions.map(printActionReducerCase).join('\n') + "\n    default:\n      return state;\n  }\n}";
     // reducerSource
     var reliefFilePath = path.dirname(file);
     function saveFile(dir, suffix, source) {

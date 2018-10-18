@@ -13,8 +13,8 @@ interface ActionContext extends ReducerContext {
 
 type AST = any[];
 type ActionData = [string, string, string, string, string]; // [actionName, payloadType, body, actionType, actionTypeText]
-type FieldData = [string, string, string]; // [name, type, initial value]
-type ImportData = string;//[string[], string, string]; // [import_names, import_path, full_import_line]
+type FieldData = [string, string, string]; // [name, type, initialValue]
+type ImportData = [string, string[]]; // [importStatement, importNames, importPath]
 
 interface WalkData {
   ast: AST;
@@ -162,6 +162,31 @@ function transpileFile(file): void {
     };
   }
 
+  function getImportedNames(decl: ts.ImportDeclaration): string[] {
+    if (decl.importClause && decl.importClause.name) {
+      return [getNodeText(decl.importClause.name)];
+    }
+
+    if (decl.importClause && decl.importClause.namedBindings) {
+      const node = decl.importClause.namedBindings;
+      switch (node.kind) {
+        case ts.SyntaxKind.NamespaceImport:
+          return [getNodeText((node as ts.NamespaceImport).name)];
+        case ts.SyntaxKind.NamedImports:
+          return (node as ts.NamedImports).elements.map(el => getNodeText(el.name));
+      }
+    }
+
+    return [];
+  }
+
+  function walkImport(decl: ts.ImportDeclaration): WalkData {
+    return {
+      imports: [[getNodeText(decl), getImportedNames(decl)]],
+      ...genAST(decl)
+    };
+  }
+
   function walkSyntaxListItem(node: ts.Node): WalkData {
     switch (node.kind) {
       case ts.SyntaxKind.ClassDeclaration:
@@ -176,10 +201,7 @@ function transpileFile(file): void {
             ...genAST(node)
           });
       case ts.SyntaxKind.ImportDeclaration:
-        return {
-          imports: [getNodeText(node)],
-          ...genAST(node)
-        };
+        return walkImport(node as ts.ImportDeclaration);
       default:
         return {
           statements: [getNodeText(node)],
@@ -215,34 +237,45 @@ function transpileFile(file): void {
   } = walk(sc);
 
   const initialFields = fields.filter(field => field[2]);
+  const actionImports = imports.filter(([importStatement, importNames]) =>
+    importNames.some(name =>
+      actions.some(([actionName, payloadType]) =>
+        payloadType.startsWith(name)
+      )
+    )
+  );
 
   const stateClass = `${reducer}State`;
 
-  function printActionType(act: ActionData): string {
-    return `${act[3]}: ${act[4]}`;
+  function printActionType([actionName, payloadType, body, actionType, actionTypeText]: ActionData): string {
+    return `${actionType}: ${actionTypeText}`;
   }
 
-  function printAction(act: ActionData): string {
-    return `export class ${act[0]}Action implements Action {
-  public type: string = ${reducer}Types.${act[3]};
-  constructor(public payload${act[1] === 'any' ? '?' : ''}: ${act[1]}) {}
+  function printAction([actionName, payloadType, body, actionType]: ActionData): string {
+    return `export class ${actionName}Action implements Action {
+  public type: string = ${reducer}Types.${actionType};
+  constructor(public payload${payloadType === 'any' ? '?' : ''}: ${payloadType}) {}
 }`;
   }
 
-  function printActionReducerCase(act: ActionData): string {
-    return `    case ${reducer}Types.${act[3]}:
-      ${act[2].split('\n').join('\n  ')}\n`;
+  function printActionReducerCase([actionName, payloadType, body, actionType]: ActionData): string {
+    return `    case ${reducer}Types.${actionType}:
+      ${body.split('\n').join('\n  ')}\n`;
   }
 
-  function printField(field: FieldData): string {
-    return `  ${field[0]}: ${field[1]};`;
+  function printField([name, type]: FieldData): string {
+    return `  ${name}: ${type};`;
   }
 
-  function printFieldInitial(field: FieldData): string {
-    return `  ${field[0]}: ${field[2]}`;
+  function printFieldInitial([name, type, initialValue]: FieldData): string {
+    return `  ${name}: ${initialValue}`;
   }
 
-  const actionsSource = `import { Action } from '@ngrx/store';
+  const actionImportStatements = [`import { Action } from '@ngrx/store';`].concat(
+    actionImports.map(([statement]: ImportData) => statement)
+  );
+
+  const actionsSource = `${actionImportStatements.join('\n')}
 
 export const ${reducer}Types = {
   ${actions.map(printActionType).join(',\n  ')}
@@ -251,10 +284,10 @@ export const ${reducer}Types = {
 ${actions.map(printAction).join('\n\n')}
 
 export type ${reducer}Actions =
-  | ${actions.map(act => act[0] + 'Action').join('\n  | ')};`;
+  | ${actions.map(([actionName]: ActionData) => actionName + 'Action').join('\n  | ')};`;
   // actionsSource
 
-  const reducerSource = `${imports.join('\n')}
+  const reducerSource = `${imports.map(([statement]: ImportData) => statement).join('\n')}
 
 ${statements.join('\n\n')}
 

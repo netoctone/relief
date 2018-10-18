@@ -1,6 +1,6 @@
 {
   "name": "relief",
-  "description": "generate @ngrx boilerplate and relief some typing pain",
+  "description": "generate @ngrx boilerplate in order to have some boredom and typing pain relief",
   "author": "Evgeniy Okhrimenko (https://github.com/netoctone)",
   "license": "MIT",
   "version": "0.0.1",
