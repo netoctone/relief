@@ -12,7 +12,14 @@ interface ActionContext extends ReducerContext {
 }
 
 type AST = any[];
-type ActionData = [string, string, string, string, string]; // [actionName, payloadType, body, actionType, actionTypeText]
+interface ActionData {
+  actionName: string;
+  payloadType: string;
+  body: string;
+  actionType: string;
+  actionTypeText: string;
+  mergeActions?: string[];
+}
 type FieldData = [string, string, string]; // [name, type, initialValue]
 type ImportData = [string, string[]]; // [importStatement, importNames, importPath]
 
@@ -71,8 +78,8 @@ function transpileFile(file): void {
     return '';
   }
 
-  function getPayloadType(decl: ts.MethodDeclaration) {
-    if (decl.type) {
+  function getPayloadType(decl?: ts.MethodDeclaration) {
+    if (decl && decl.type) {
       return getNodeText(decl.type);
     } else {
       return 'any';
@@ -99,27 +106,57 @@ function transpileFile(file): void {
     return pascalToWords(str).toLowerCase();
   }
 
+  function isCallExpression(node: ts.Node): node is ts.CallExpression {
+    return node.kind === ts.SyntaxKind.CallExpression;
+  }
+
+  function isStringLiteral(node: ts.Node): node is ts.StringLiteral {
+    return node.kind === ts.SyntaxKind.StringLiteral;
+  }
+
+  function generateActionData(action: string, reducer: string, decl?: ts.MethodDeclaration): ActionData {
+    return {
+      actionName: action,
+      payloadType: getPayloadType(decl),
+      body: decl ? decl.body.statements.map(st => getNodeText(st)).join('\n') : '',
+      actionType: pascalToUnderscore(action),
+      actionTypeText: `'[${pascalToWords(reducer)}] ${pascalToLowerWords(action)}'`,
+      mergeActions: []
+    };
+  }
+
   function walkReducerMethodDecl(c: ActionContext, decl: ts.MethodDeclaration): WalkData {
-    const defaultActionType = pascalToUnderscore(c.action);
-    const defaultActionTypeText = `'[${pascalToWords(c.reducer)}] ${pascalToLowerWords(c.action)}'`;
-    const payloadType = getPayloadType(decl);
     if (!decl.body) {
       throw `${c.action} does not have a function body`;
     }
-    const fnBody = decl.body.statements.map(st => getNodeText(st)).join('\n');
-    const resPrefix: string[] = [c.action, payloadType, fnBody];
-    let res: string[];
+
+    const res: ActionData = generateActionData(c.action, c.reducer, decl);
 
     if (decl.parameters.length === 1) {
       const param = decl.parameters[0];
       const name = getName(param);
       if (param.initializer) {
-        res = resPrefix.concat([name, getNodeText(param.initializer)]);
+        res.actionType = name;
+        res.actionTypeText = getNodeText(param.initializer);
       } else {
-        res = resPrefix.concat([name, defaultActionTypeText]);
+        res.actionType = name;
       }
-    } else {
-      res = resPrefix.concat([defaultActionType, defaultActionTypeText]);
+    }
+
+    if (decl.decorators) {
+      const decExpr = decl.decorators.map(dec => dec.expression).find(decExpr => {
+        if (isCallExpression(decExpr)) {
+          if (getNodeText(decExpr.expression) === 'MergeActions') {
+            return true;
+          }
+        }
+        return false;
+      });
+      if (decExpr && isCallExpression(decExpr)) {
+        res.mergeActions = decExpr.arguments.filter(arg => {
+          return isStringLiteral(arg);
+        }).map(arg => (arg as ts.StringLiteral).text);
+      }
     }
 
     return {
@@ -236,10 +273,22 @@ function transpileFile(file): void {
     statements
   } = walk(sc);
 
+  actions.forEach(action => {
+    if (action.mergeActions) {
+      action.mergeActions.forEach(mergeAction => {
+        if (actions.find(act => act.actionName === mergeAction)) {
+          return;
+        }
+        actions.push(generateActionData(mergeAction, reducer));
+        return;
+      });
+    }
+  });
+
   const initialFields = fields.filter(field => field[2]);
   const actionImports = imports.filter(([importStatement, importNames]) =>
     importNames.some(name =>
-      actions.some(([actionName, payloadType]) =>
+      actions.some(({ payloadType }: ActionData) =>
         payloadType.startsWith(name)
       )
     )
@@ -247,20 +296,30 @@ function transpileFile(file): void {
 
   const stateClass = `${reducer}State`;
 
-  function printActionType([actionName, payloadType, body, actionType, actionTypeText]: ActionData): string {
+  function printActionType({ actionType, actionTypeText }: ActionData): string {
     return `${actionType}: ${actionTypeText}`;
   }
 
-  function printAction([actionName, payloadType, body, actionType]: ActionData): string {
+  function printAction({ actionName, payloadType, actionType }: ActionData): string {
     return `export class ${actionName}Action implements Action {
   public type: string = ${reducer}Types.${actionType};
   constructor(public payload${payloadType === 'any' ? '?' : ''}: ${payloadType}) {}
 }`;
   }
 
-  function printActionReducerCase([actionName, payloadType, body, actionType]: ActionData): string {
-    return `    case ${reducer}Types.${actionType}:
-      ${body.split('\n').join('\n  ')}\n`;
+  function printActionReducerCase(actions: ActionData[]): (ActionData) => string {
+    return (action: ActionData): string => {
+      const { body, mergeActions } = action;
+      if (body.trim() === '') {
+        return '';
+      } else {
+        const caseActions = mergeActions.map(mergeAction => actions.find(act => act.actionName === mergeAction));
+        caseActions.push(action);
+        const cases = caseActions.map(act => `    case ${reducer}Types.${act.actionType}:`);
+        cases.push(`      ${body.split('\n').join('\n  ')}\n`);
+        return cases.join('\n');
+      }
+    }
   }
 
   function printField([name, type]: FieldData): string {
@@ -284,7 +343,7 @@ export const ${reducer}Types = {
 ${actions.map(printAction).join('\n\n')}
 
 export type ${reducer}Actions =
-  | ${actions.map(([actionName]: ActionData) => actionName + 'Action').join('\n  | ')};`;
+  | ${actions.map(({ actionName }: ActionData) => actionName + 'Action').join('\n  | ')};`;
   // actionsSource
 
   const reducerSource = `${imports.map(([statement]: ImportData) => statement).join('\n')}
@@ -304,7 +363,7 @@ export function ${pascalToCamel(reducer)}(
   action: ${reducer}Actions
 ): ${stateClass} {
   switch (action.type) {
-${actions.map(printActionReducerCase).join('\n')}
+${actions.map(printActionReducerCase(actions)).join('\n')}
     default:
       return state;
   }

@@ -16,6 +16,7 @@ class Book extends Reducer {
   query: string = '';
   book: Book | undefined = undefined;
 
+  @MergeActions('SearchInit')
   SearchStart(SEARCH_START = '[Book] search start'): string {
     return {
       ...state,

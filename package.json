@@ -10,7 +10,8 @@
   },
   "main": "relief.js",
   "files": [
-    "relief.js"
+    "relief.js",
+    "rts-lint.json"
   ],
   "engines": {
     "node": "*"
@@ -24,6 +25,7 @@
   },
   "devDependencies": {
     "@types/node": "~6.0.60",
-    "@types/glob": "^7.1.1"
+    "@types/glob": "^7.1.1",
+    "tslint": "^5.9.1"
   }
 }

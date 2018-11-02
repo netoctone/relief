@@ -54,7 +54,7 @@ function transpileFile(file) {
         return '';
     }
     function getPayloadType(decl) {
-        if (decl.type) {
+        if (decl && decl.type) {
             return getNodeText(decl.type);
         }
         else {
@@ -76,28 +76,52 @@ function transpileFile(file) {
     function pascalToLowerWords(str) {
         return pascalToWords(str).toLowerCase();
     }
+    function isCallExpression(node) {
+        return node.kind === ts.SyntaxKind.CallExpression;
+    }
+    function isStringLiteral(node) {
+        return node.kind === ts.SyntaxKind.StringLiteral;
+    }
+    function generateActionData(action, reducer, decl) {
+        return {
+            actionName: action,
+            payloadType: getPayloadType(decl),
+            body: decl ? decl.body.statements.map(function (st) { return getNodeText(st); }).join('\n') : '',
+            actionType: pascalToUnderscore(action),
+            actionTypeText: "'[" + pascalToWords(reducer) + "] " + pascalToLowerWords(action) + "'",
+            mergeActions: []
+        };
+    }
     function walkReducerMethodDecl(c, decl) {
-        var defaultActionType = pascalToUnderscore(c.action);
-        var defaultActionTypeText = "'[" + pascalToWords(c.reducer) + "] " + pascalToLowerWords(c.action) + "'";
-        var payloadType = getPayloadType(decl);
         if (!decl.body) {
             throw c.action + " does not have a function body";
         }
-        var fnBody = decl.body.statements.map(function (st) { return getNodeText(st); }).join('\n');
-        var resPrefix = [c.action, payloadType, fnBody];
-        var res;
+        var res = generateActionData(c.action, c.reducer, decl);
         if (decl.parameters.length === 1) {
             var param = decl.parameters[0];
             var name_1 = getName(param);
             if (param.initializer) {
-                res = resPrefix.concat([name_1, getNodeText(param.initializer)]);
+                res.actionType = name_1;
+                res.actionTypeText = getNodeText(param.initializer);
             }
             else {
-                res = resPrefix.concat([name_1, defaultActionTypeText]);
+                res.actionType = name_1;
             }
         }
-        else {
-            res = resPrefix.concat([defaultActionType, defaultActionTypeText]);
+        if (decl.decorators) {
+            var decExpr = decl.decorators.map(function (dec) { return dec.expression; }).find(function (decExpr) {
+                if (isCallExpression(decExpr)) {
+                    if (getNodeText(decExpr.expression) === 'MergeActions') {
+                        return true;
+                    }
+                }
+                return false;
+            });
+            if (decExpr && isCallExpression(decExpr)) {
+                res.mergeActions = decExpr.arguments.filter(function (arg) {
+                    return isStringLiteral(arg);
+                }).map(function (arg) { return arg.text; });
+            }
         }
         return __assign({ actions: [res] }, genAST(decl));
     }
@@ -175,28 +199,50 @@ function transpileFile(file) {
         }
     }
     var _a = walk(sc), reducer = _a.reducer, actions = _a.actions, fields = _a.fields, imports = _a.imports, statements = _a.statements;
+    actions.forEach(function (action) {
+        if (action.mergeActions) {
+            action.mergeActions.forEach(function (mergeAction) {
+                if (actions.find(function (act) { return act.actionName === mergeAction; })) {
+                    return;
+                }
+                actions.push(generateActionData(mergeAction, reducer));
+                return;
+            });
+        }
+    });
     var initialFields = fields.filter(function (field) { return field[2]; });
     var actionImports = imports.filter(function (_a) {
         var importStatement = _a[0], importNames = _a[1];
         return importNames.some(function (name) {
             return actions.some(function (_a) {
-                var actionName = _a[0], payloadType = _a[1];
+                var payloadType = _a.payloadType;
                 return payloadType.startsWith(name);
             });
         });
     });
     var stateClass = reducer + "State";
     function printActionType(_a) {
-        var actionName = _a[0], payloadType = _a[1], body = _a[2], actionType = _a[3], actionTypeText = _a[4];
+        var actionType = _a.actionType, actionTypeText = _a.actionTypeText;
         return actionType + ": " + actionTypeText;
     }
     function printAction(_a) {
-        var actionName = _a[0], payloadType = _a[1], body = _a[2], actionType = _a[3];
+        var actionName = _a.actionName, payloadType = _a.payloadType, actionType = _a.actionType;
         return "export class " + actionName + "Action implements Action {\n  public type: string = " + reducer + "Types." + actionType + ";\n  constructor(public payload" + (payloadType === 'any' ? '?' : '') + ": " + payloadType + ") {}\n}";
     }
-    function printActionReducerCase(_a) {
-        var actionName = _a[0], payloadType = _a[1], body = _a[2], actionType = _a[3];
-        return "    case " + reducer + "Types." + actionType + ":\n      " + body.split('\n').join('\n  ') + "\n";
+    function printActionReducerCase(actions) {
+        return function (action) {
+            var body = action.body, mergeActions = action.mergeActions;
+            if (body.trim() === '') {
+                return '';
+            }
+            else {
+                var caseActions = mergeActions.map(function (mergeAction) { return actions.find(function (act) { return act.actionName === mergeAction; }); });
+                caseActions.push(action);
+                var cases = caseActions.map(function (act) { return "    case " + reducer + "Types." + act.actionType + ":"; });
+                cases.push("      " + body.split('\n').join('\n  ') + "\n");
+                return cases.join('\n');
+            }
+        };
     }
     function printField(_a) {
         var name = _a[0], type = _a[1];
@@ -211,14 +257,14 @@ function transpileFile(file) {
         return statement;
     }));
     var actionsSource = actionImportStatements.join('\n') + "\n\nexport const " + reducer + "Types = {\n  " + actions.map(printActionType).join(',\n  ') + "\n}\n\n" + actions.map(printAction).join('\n\n') + "\n\nexport type " + reducer + "Actions =\n  | " + actions.map(function (_a) {
-        var actionName = _a[0];
+        var actionName = _a.actionName;
         return actionName + 'Action';
     }).join('\n  | ') + ";";
     // actionsSource
     var reducerSource = imports.map(function (_a) {
         var statement = _a[0];
         return statement;
-    }).join('\n') + "\n\n" + statements.join('\n\n') + "\n\ninterface " + stateClass + " {\n" + fields.map(printField).join('\n') + "\n}\n\nexport const initialState: " + stateClass + " = {\n" + initialFields.map(printFieldInitial).join(',\n') + "\n};\n\nexport function " + pascalToCamel(reducer) + "(\n  state: " + stateClass + " = initialState,\n  action: " + reducer + "Actions\n): " + stateClass + " {\n  switch (action.type) {\n" + actions.map(printActionReducerCase).join('\n') + "\n    default:\n      return state;\n  }\n}";
+    }).join('\n') + "\n\n" + statements.join('\n\n') + "\n\ninterface " + stateClass + " {\n" + fields.map(printField).join('\n') + "\n}\n\nexport const initialState: " + stateClass + " = {\n" + initialFields.map(printFieldInitial).join(',\n') + "\n};\n\nexport function " + pascalToCamel(reducer) + "(\n  state: " + stateClass + " = initialState,\n  action: " + reducer + "Actions\n): " + stateClass + " {\n  switch (action.type) {\n" + actions.map(printActionReducerCase(actions)).join('\n') + "\n    default:\n      return state;\n  }\n}";
     // reducerSource
     var reliefFilePath = path.dirname(file);
     function saveFile(dir, suffix, source) {
